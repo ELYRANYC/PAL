@@ -1,0 +1,13 @@
+{
+  "name": "elyra-paletas",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Elyra Paletas — Mexican paletas, Highland NY.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  }
+}
