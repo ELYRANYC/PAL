@@ -1,5 +1,4 @@
-// Vercel Serverless Function — Catering / Wholesale inquiry form
-// Receives submissions from the catering form on the homepage.
+// Vercel Serverless Function — Catering / Wholesale inquiry form.
 //
 // To actually receive emails, set the following environment variables
 // in your Vercel project (Settings → Environment Variables):
@@ -11,43 +10,20 @@
 // Without these set, the function still returns 200 and logs the submission
 // to the Vercel function logs so the site keeps working out-of-the-box.
 
+import {
+    isValidEmail,
+    escapeHtml,
+    readBody,
+    isAllowedOrigin,
+    clientIp,
+    rateLimit,
+} from '../lib/http.js';
+
 const ALLOWED_FIELDS = [
     'inquiry-type', 'name', 'email', 'phone', 'contact-method',
     'date', 'quantity', 'event-type', 'venue',
     'business-name', 'business-type', 'frequency', 'notes'
 ];
-
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
-function isValidEmail(email) {
-    return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
-
-async function readBody(req) {
-    if (req.body && typeof req.body === 'object') return req.body;
-    if (typeof req.body === 'string') {
-        try { return JSON.parse(req.body); } catch { /* fall through */ }
-    }
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const raw = Buffer.concat(chunks).toString('utf8');
-    if (!raw) return {};
-    const contentType = (req.headers['content-type'] || '').toLowerCase();
-    if (contentType.includes('application/json')) {
-        try { return JSON.parse(raw); } catch { return {}; }
-    }
-    if (contentType.includes('application/x-www-form-urlencoded')) {
-        return Object.fromEntries(new URLSearchParams(raw));
-    }
-    try { return JSON.parse(raw); } catch { return {}; }
-}
 
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
@@ -55,10 +31,26 @@ export default async function handler(req, res) {
         return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const data = await readBody(req);
+    if (!isAllowedOrigin(req)) {
+        return res.status(403).json({ error: 'Forbidden' });
+    }
 
-    // Honeypot — if a bot fills this in, silently pretend we accepted it
-    if (data['bot-field']) {
+    // 5 submissions per IP per 10 minutes. Tuned for a small site —
+    // catering forms are rarely submitted in bursts by real humans.
+    if (!rateLimit(`contact:${clientIp(req)}`, 5, 10 * 60 * 1000)) {
+        res.setHeader('Retry-After', '600');
+        return res.status(429).json({ error: 'Too many requests' });
+    }
+
+    let data;
+    try {
+        data = await readBody(req);
+    } catch (err) {
+        return res.status(err.statusCode || 400).json({ error: err.message });
+    }
+
+    // Honeypot — silently accept obvious bot submissions.
+    if (data.elyra_check) {
         return res.status(200).json({ ok: true });
     }
 
@@ -66,7 +58,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Name and a valid email are required' });
     }
 
-    // Build a readable summary, only with whitelisted fields
+    // Build a readable summary using only whitelisted fields, length-capped.
     const submission = {};
     for (const key of ALLOWED_FIELDS) {
         if (data[key]) submission[key] = String(data[key]).slice(0, 2000);
@@ -87,6 +79,8 @@ export default async function handler(req, res) {
     if (apiKey && toAddress && fromAddress) {
         try {
             const subject = `New ${submission['inquiry-type'] === 'retail' ? 'wholesale' : 'catering'} inquiry — ${submission.name}`;
+            // Note: we intentionally do NOT set reply_to from user input.
+            // The submitter email is included in the body for manual reply.
             const response = await fetch('https://api.resend.com/emails', {
                 method: 'POST',
                 headers: {
@@ -96,7 +90,6 @@ export default async function handler(req, res) {
                 body: JSON.stringify({
                     from: fromAddress,
                     to: [toAddress],
-                    reply_to: submission.email,
                     subject,
                     text: lines,
                     html: `<table style="font-family:Inter,sans-serif;font-size:14px;">${htmlLines}</table>`
@@ -112,7 +105,7 @@ export default async function handler(req, res) {
             return res.status(502).json({ error: 'Mail delivery failed' });
         }
     } else {
-        // No mail provider configured — log and accept so the deploy still works
+        // No mail provider configured — log and accept so the deploy still works.
         console.log('[contact] submission received (no mail provider configured):\n' + lines);
     }
 

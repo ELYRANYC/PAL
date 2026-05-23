@@ -1,8 +1,7 @@
-// Vercel Serverless Function — Newsletter signup
-// Receives email signups from the footer newsletter form.
+// Vercel Serverless Function — Newsletter signup.
 //
-// To actually deliver these somewhere, set environment variables in your
-// Vercel project (Settings → Environment Variables). Two options:
+// To deliver signups somewhere, set environment variables in your Vercel
+// project (Settings → Environment Variables). Two options:
 //
 // (A) Send each signup as an email notification (default):
 //     RESEND_API_KEY        from https://resend.com
@@ -13,30 +12,15 @@
 //     replace the fetch() call below with your provider's subscribe endpoint.
 //
 // Without anything configured, the function returns 200 and logs the email
-// to the function logs so the site still works out-of-the-box.
+// so the site still works out-of-the-box.
 
-function isValidEmail(email) {
-    return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
-
-async function readBody(req) {
-    if (req.body && typeof req.body === 'object') return req.body;
-    if (typeof req.body === 'string') {
-        try { return JSON.parse(req.body); } catch { /* fall through */ }
-    }
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const raw = Buffer.concat(chunks).toString('utf8');
-    if (!raw) return {};
-    const contentType = (req.headers['content-type'] || '').toLowerCase();
-    if (contentType.includes('application/json')) {
-        try { return JSON.parse(raw); } catch { return {}; }
-    }
-    if (contentType.includes('application/x-www-form-urlencoded')) {
-        return Object.fromEntries(new URLSearchParams(raw));
-    }
-    try { return JSON.parse(raw); } catch { return {}; }
-}
+import {
+    isValidEmail,
+    readBody,
+    isAllowedOrigin,
+    clientIp,
+    rateLimit,
+} from '../lib/http.js';
 
 export default async function handler(req, res) {
     if (req.method !== 'POST') {
@@ -44,10 +28,26 @@ export default async function handler(req, res) {
         return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const data = await readBody(req);
+    if (!isAllowedOrigin(req)) {
+        return res.status(403).json({ error: 'Forbidden' });
+    }
 
-    // Honeypot — silently accept obvious bot submissions
-    if (data['bot-field']) {
+    // 3 signups per IP per hour. A real person signing up multiple times in
+    // an hour is almost certainly accidental double-submits.
+    if (!rateLimit(`newsletter:${clientIp(req)}`, 3, 60 * 60 * 1000)) {
+        res.setHeader('Retry-After', '3600');
+        return res.status(429).json({ error: 'Too many requests' });
+    }
+
+    let data;
+    try {
+        data = await readBody(req);
+    } catch (err) {
+        return res.status(err.statusCode || 400).json({ error: err.message });
+    }
+
+    // Honeypot — silently accept obvious bot submissions.
+    if (data.elyra_check) {
         return res.status(200).json({ ok: true });
     }
 
